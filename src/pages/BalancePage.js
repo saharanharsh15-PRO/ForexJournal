@@ -149,7 +149,7 @@ export default function BalancePage() {
         tradePnl:w.tradePnl, deposits:w.deposits,
         withdrawals:w.withdrawals, profitWithdrawals:actualWithdraw,
         startBal:w.startBalance, endBal:w.endBalance,
-        tradeOnlyBal: splitDue ? newThreshold : tradeOnlyBal,
+        tradeOnlyBal: didWithdraw ? newThreshold : tradeOnlyBal,
         threshold, aboveThresh, splitDue,
         suggestedWithdraw, suggestedKeep,
         actualWithdraw, didWithdraw,
@@ -157,8 +157,8 @@ export default function BalancePage() {
         tradeCount:w.rows.filter(r=>r.isTrade).length,
       };
 
-      // Always carry forward threshold when above it — actual withdrawal or formula
-      if (splitDue) {
+      // Threshold only advances when a profit withdrawal is actually logged
+      if (didWithdraw) {
         threshold    = newThreshold;
         tradeOnlyBal = newThreshold;
       }
