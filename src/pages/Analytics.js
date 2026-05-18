@@ -1,0 +1,777 @@
+import React, { useMemo, useState } from 'react';
+import { AreaChart, Area, BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell, ReferenceLine } from 'recharts';
+import { useTrades } from '../context/TradesContext';
+
+const fmt  = n => `${n>=0?'+':'-'}$${Math.abs(n).toFixed(2)}`;
+const fmtK = n => Math.abs(n)>=1000 ? `${n<0?'-':''}$${(Math.abs(n)/1000).toFixed(1)}k` : fmt(n);
+
+// "2026-02-04" or "02-04" → "Feb 4"
+function fmtAxisDate(d) {
+  if (!d) return '';
+  const M = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const p = d.split('-');
+  if (p.length === 3) return M[parseInt(p[1],10)-1] + ' ' + parseInt(p[2],10);
+  if (p.length === 2) return M[parseInt(p[0],10)-1] + ' ' + parseInt(p[1],10);
+  return d;
+}
+
+const PERIODS = ['Settings Range','Today','7 Days','30 Days','3 Months','1 Year','All Time','Custom'];
+const FTYPES  = ['All Trades','Winners','Losers'];
+
+const TIP = ({ active, payload, label }) => {
+  if (!active||!payload?.length) return null;
+  return (
+    <div className="chart-tip">
+      <div className="chart-tip-label">{label}</div>
+      <div className={`chart-tip-val ${payload[0].value>=0?'pos':'neg'}`}>{fmt(payload[0].value)}</div>
+    </div>
+  );
+};
+
+function getSession(time) {
+  if (!time) return 'unknown';
+  const [h] = time.split(':').map(Number);
+  const utc = h;
+  if (utc>=22||utc<8)  return 'asian';
+  if (utc>=8&&utc<13)  return 'london';
+  if (utc>=13&&utc<22) return 'newyork';
+  return 'other';
+}
+
+export default function Analytics() {
+  const { trades, stats, getJournal } = useTrades();
+  const [period,    setPeriod]    = useState('Settings Range');
+  const [ftype,     setFtype]     = useState('All Trades');
+  const [customFrom, setCustomFrom] = useState('');
+  const [customTo,   setCustomTo]   = useState('');
+  const [ecMode,     setEcMode]     = useState('equity');
+
+  // Base: exclude withdrawals always
+  const baseTrades = useMemo(() => trades.filter(t => {
+    if (t.isWithdrawal) return false;
+    return true;
+  }), [trades]);
+
+  const filteredTrades = useMemo(() => {
+    let arr = [...baseTrades];
+
+    // Apply period filter
+    if (period === 'Settings Range') {
+      // Use the date range from Settings / active account
+      const sd = stats.statsStartDate || '';
+      const ed = stats.statsEndDate   || '';
+      if (sd) arr = arr.filter(t => (t.exitDate||t.entryDate||'') >= sd);
+      if (ed) arr = arr.filter(t => (t.exitDate||t.entryDate||'') <= ed);
+    } else if (period === 'Custom') {
+      if (customFrom) arr = arr.filter(t => (t.exitDate||t.entryDate||'') >= customFrom);
+      if (customTo)   arr = arr.filter(t => (t.exitDate||t.entryDate||'') <= customTo);
+    } else if (period !== 'All Time') {
+      const cutoff = new Date();
+      if      (period==='Today')     cutoff.setDate(cutoff.getDate()-1);
+      else if (period==='7 Days')    cutoff.setDate(cutoff.getDate()-7);
+      else if (period==='30 Days')   cutoff.setMonth(cutoff.getMonth()-1);
+      else if (period==='3 Months')  cutoff.setMonth(cutoff.getMonth()-3);
+      else if (period==='1 Year')    cutoff.setFullYear(cutoff.getFullYear()-1);
+      arr = arr.filter(t => new Date(t.exitDate||t.entryDate) >= cutoff);
+    }
+
+    // Apply type filter
+    if (ftype==='Winners') arr=arr.filter(t=>t.status==='Win');
+    if (ftype==='Losers')  arr=arr.filter(t=>t.status==='Loss');
+    return arr;
+  }, [baseTrades, period, ftype, customFrom, customTo, stats.statsStartDate, stats.statsEndDate]);
+
+  const fs = useMemo(() => {
+    const brokeragePerLot = stats.brokeragePerLot || 0;
+    const tradeComm = t => brokeragePerLot > 0 ? brokeragePerLot * (t.size||0) : (t.fees||0);
+    const netPnl    = t => (t.pnl||0) - tradeComm(t);
+
+    const wins     = filteredTrades.filter(t=>t.status==='Win');
+    const losses   = filteredTrades.filter(t=>t.status==='Loss');
+    const wlOnly   = filteredTrades.filter(t=>t.status==='Win'||t.status==='Loss');
+    // Profit factor uses NET P&L of wins vs losses only (BE excluded)
+    const gp=wins.reduce((s,t)=>s+netPnl(t),0);
+    const gl=Math.abs(losses.reduce((s,t)=>s+netPnl(t),0));
+    const totalPnl=filteredTrades.reduce((s,t)=>s+netPnl(t),0);
+    const totalComm=filteredTrades.reduce((s,t)=>s+tradeComm(t),0);
+    const wr=wlOnly.length?(wins.length/wlOnly.length)*100:0;
+    const pf=gl>0?gp/gl:gp>0?Infinity:0;
+    const exp=wlOnly.length?totalPnl/wlOnly.length:0;
+    const avgW=wins.length?gp/wins.length:0;
+    const avgL=losses.length?gl/losses.length:0;
+    const best=filteredTrades.length?Math.max(...filteredTrades.map(t=>netPnl(t))):0;
+    const worst=filteredTrades.length?Math.min(...filteredTrades.map(t=>netPnl(t))):0;
+
+    // Streaks — breakeven skips, doesn't reset
+    const sorted=[...filteredTrades].sort((a,b)=>a.entryDate.localeCompare(b.entryDate));
+    let maxWs=0,maxLs=0,cw=0,cl=0;
+    sorted.forEach(t=>{
+      if(t.status==='Win'){cw++;cl=0;maxWs=Math.max(maxWs,cw);}
+      else if(t.status==='Loss'){cl++;cw=0;maxLs=Math.max(maxLs,cl);}
+    });
+
+    // Max DD
+    let peak=0,cum2=0,maxDD=0;
+    sorted.forEach(t=>{cum2+=(t.pnl||0);peak=Math.max(peak,cum2);maxDD=Math.max(maxDD,peak-cum2);});
+
+    // RR avg — checks rMultiple, then journal rr, then auto-calc from SL/TP
+    const rrVals = filteredTrades.map(t => {
+      if (t.rMultiple && Math.abs(t.rMultiple) > 0) return Math.abs(t.rMultiple);
+      const j = typeof getJournal === 'function' ? (getJournal(t.id) || {}) : {};
+      if (j.rr && parseFloat(j.rr) > 0) return parseFloat(j.rr);
+      const entry = t.entryPrice || 0;
+      const sl  = parseFloat(j.sl  || t.stopLoss   || 0);
+      const tp  = parseFloat(j.tp  || t.takeProfit || 0);
+      if (entry && sl && tp) {
+        const risk = Math.abs(entry - sl), reward = Math.abs(tp - entry);
+        if (risk > 0) return reward / risk;
+      }
+      return null;
+    }).filter(v => v !== null);
+    const avgRR = rrVals.length ? rrVals.reduce((s,v)=>s+v,0)/rrVals.length : 0;
+
+    return {totalPnl,totalComm,wins:wins.length,losses:losses.length,breakeven:filteredTrades.length-wlOnly.length,total:wlOnly.length,totalAll:filteredTrades.length,wr,pf,exp,avgW,avgL,best,worst,maxWs,maxLs,maxDD,avgRR,gp,gl};
+  }, [filteredTrades]);
+
+  // Equity curve
+  const equityCurve = useMemo(()=>{
+    const sorted=[...filteredTrades].filter(t=>t.entryDate).sort((a,b)=>(a.entryDate||'').localeCompare(b.entryDate||''));
+    let cum=0;
+    return sorted.map(t=>{cum+=(t.pnl||0);return{date:fmtAxisDate(t.entryDate||''),pnl:parseFloat(cum.toFixed(2))};});
+  },[filteredTrades]);
+
+  // Drawdown curve — how far below the running peak at each point
+  const drawdownCurve = useMemo(()=>{
+    const sorted=[...filteredTrades].filter(t=>t.entryDate).sort((a,b)=>(a.entryDate||'').localeCompare(b.entryDate||''));
+    let cum=0,peak=0;
+    return sorted.map(t=>{
+      cum+=(t.pnl||0); peak=Math.max(peak,cum);
+      return{date:fmtAxisDate(t.entryDate||''),dd:-(parseFloat((peak-cum).toFixed(2)))};
+    });
+  },[filteredTrades]);
+
+  // Day performance
+  const dayPerf = useMemo(()=>{
+    const days=['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
+    const map={};
+    filteredTrades.forEach(t=>{
+      const d=new Date(t.entryDate).getDay();
+      const dk=days[(d+6)%7];
+      if(!map[dk]) map[dk]={pnl:0,total:0};
+      map[dk].pnl+=t.pnl||0; map[dk].total++;
+    });
+    return days.map(d=>({day:d,pnl:parseFloat((map[d]?.pnl||0).toFixed(2)),total:map[d]?.total||0}));
+  },[filteredTrades]);
+
+  // Long vs Short
+  const lsData = useMemo(()=>{
+    const longs=filteredTrades.filter(t=>t.side==='Long');
+    const shorts=filteredTrades.filter(t=>t.side==='Short');
+    const lwins=longs.filter(t=>t.status==='Win').length;
+    const swins=shorts.filter(t=>t.status==='Win').length;
+    return {
+      long:{total:longs.length,pnl:longs.reduce((s,t)=>s+(t.pnl||0),0),wr:longs.length?(lwins/longs.length*100).toFixed(1):'0.0'},
+      short:{total:shorts.length,pnl:shorts.reduce((s,t)=>s+(t.pnl||0),0),wr:shorts.length?(swins/shorts.length*100).toFixed(1):'0.0'},
+    };
+  },[filteredTrades]);
+
+  // Top symbols
+  const topSymbols = useMemo(()=>{
+    const map={};
+    filteredTrades.forEach(t=>{
+      if(!map[t.symbol]) map[t.symbol]={pnl:0,total:0,wins:0};
+      map[t.symbol].pnl+=t.pnl||0; map[t.symbol].total++;
+      if(t.status==='Win') map[t.symbol].wins++;
+    });
+    return Object.entries(map).map(([sym,s])=>({sym,pnl:s.pnl,total:s.total,wr:s.total?(s.wins/s.total*100).toFixed(0)+'%':'0%'}))
+      .sort((a,b)=>Math.abs(b.pnl)-Math.abs(a.pnl)).slice(0,5);
+  },[filteredTrades]);
+
+  // Setup breakdown
+  const setupStats = useMemo(() => {
+    const map = {};
+    const brokeragePerLot = stats.brokeragePerLot || 0;
+    const tradeComm = t => brokeragePerLot > 0 ? brokeragePerLot * (t.size||0) : (t.fees||0);
+    const netPnl = t => (t.pnl||0) - tradeComm(t);
+
+    filteredTrades.forEach(t => {
+      // Handle both string and array setup
+      const setups = Array.isArray(t.setup)
+        ? t.setup
+        : t.setup ? [t.setup] : ['No Setup'];
+      setups.forEach(s => {
+        if (!map[s]) map[s] = { wins:0, losses:0, be:0, total:0, pnl:0 };
+        map[s].total++;
+        map[s].pnl += netPnl(t);
+        if (t.status==='Win')       map[s].wins++;
+        else if (t.status==='Loss') map[s].losses++;
+        else                        map[s].be++;
+      });
+    });
+
+    return Object.entries(map)
+      .map(([setup, d]) => ({
+        setup,
+        wins:   d.wins,
+        losses: d.losses,
+        be:     d.be,
+        total:  d.total,
+        pnl:    parseFloat(d.pnl.toFixed(2)),
+        wr:     (d.wins+d.losses) > 0
+          ? ((d.wins/(d.wins+d.losses))*100).toFixed(1)
+          : '0.0',
+      }))
+      .sort((a,b) => b.total - a.total);
+  }, [filteredTrades, stats.brokeragePerLot]);
+
+  // Sessions
+  const sessions = useMemo(()=>{
+    const map={asian:{pnl:0,total:0,wins:0},london:{pnl:0,total:0,wins:0},newyork:{pnl:0,total:0,wins:0}};
+    filteredTrades.forEach(t=>{
+      const s=getSession(t.entryTime);
+      if(map[s]){map[s].pnl+=t.pnl||0;map[s].total++;if(t.status==='Win')map[s].wins++;}
+    });
+    return {
+      asian:  {...map.asian,wr:map.asian.total?(map.asian.wins/map.asian.total*100).toFixed(1):'0.0',   label:'Asian',   time:'22:00 – 08:00 UTC'},
+      london: {...map.london,wr:map.london.total?(map.london.wins/map.london.total*100).toFixed(1):'0.0', label:'London',  time:'08:00 – 13:00 UTC'},
+      newyork:{...map.newyork,wr:map.newyork.total?(map.newyork.wins/map.newyork.total*100).toFixed(1):'0.0',label:'New York',time:'13:00 – 22:00 UTC'},
+    };
+  },[filteredTrades]);
+
+  // Monthly stats
+  const monthStats = useMemo(()=>{
+    const map={};
+    trades.forEach(t=>{
+      const ym=t.entryDate.slice(0,7);
+      if(!map[ym]) map[ym]=0;
+      map[ym]+=t.pnl||0;
+    });
+    const vals=Object.values(map);
+    const best=vals.length?Math.max(...vals):0;
+    const worst=vals.length?Math.min(...vals):0;
+    const avg=vals.length?vals.reduce((s,v)=>s+v,0)/vals.length:0;
+    const bestMonth=Object.entries(map).find(([,v])=>v===best);
+    const worstMonth=Object.entries(map).find(([,v])=>v===worst);
+    return {best,worst,avg,bestMonth:bestMonth?.[0],worstMonth:worstMonth?.[0]};
+  },[trades]);
+
+  // Day map for trading days
+  const tradingDays = useMemo(()=>{
+    const days=new Set(filteredTrades.map(t=>t.entryDate));
+    const dayPnl={};
+    filteredTrades.forEach(t=>{if(!dayPnl[t.entryDate])dayPnl[t.entryDate]=0;dayPnl[t.entryDate]+=t.pnl||0;});
+    const winDays=Object.values(dayPnl).filter(v=>v>0).length;
+    const lossDays=Object.values(dayPnl).filter(v=>v<0).length;
+    const bestDay=Object.values(dayPnl).length?Math.max(...Object.values(dayPnl)):0;
+    const worstDay=Object.values(dayPnl).length?Math.min(...Object.values(dayPnl)):0;
+    const avgDayPnl=Object.values(dayPnl).length?Object.values(dayPnl).reduce((s,v)=>s+v,0)/Object.values(dayPnl).length:0;
+    const avgWinDay=Object.values(dayPnl).filter(v=>v>0);
+    const avgLossDay=Object.values(dayPnl).filter(v=>v<0);
+    return {total:days.size,winDays,lossDays,bestDay,worstDay,avgDayPnl,
+      avgWinDay:avgWinDay.length?avgWinDay.reduce((s,v)=>s+v,0)/avgWinDay.length:0,
+      avgLossDay:avgLossDay.length?avgLossDay.reduce((s,v)=>s+v,0)/avgLossDay.length:0};
+  },[filteredTrades]);
+
+  const maxDayAbs=Math.max(...dayPerf.map(d=>Math.abs(d.pnl)),1);
+
+  // Monthly P&L bar chart data
+  const monthlyChartData = useMemo(() => {
+    const map = {};
+    filteredTrades.forEach(t => {
+      const ym = (t.exitDate||t.entryDate||'').slice(0,7);
+      if (!ym) return;
+      if (!map[ym]) map[ym] = 0;
+      map[ym] += t.pnl||0;
+    });
+    return Object.entries(map).sort(([a],[b])=>a.localeCompare(b)).map(([ym, pnl]) => ({
+      month: new Date(ym+'-01T12:00:00').toLocaleDateString('en-US',{month:'short',year:'2-digit'}),
+      pnl: parseFloat(pnl.toFixed(2)),
+    }));
+  }, [filteredTrades]);
+
+  // Hourly performance
+  const hourlyData = useMemo(() => {
+    const map = {};
+    filteredTrades.forEach(t => {
+      if (!t.entryTime) return;
+      const h = parseInt(t.entryTime.split(':')[0], 10);
+      if (isNaN(h)) return;
+      if (!map[h]) map[h] = { pnl:0, total:0 };
+      map[h].pnl += t.pnl||0; map[h].total++;
+    });
+    return Array.from({length:24},(_,h) => ({
+      hour: `${String(h).padStart(2,'0')}:00`,
+      pnl:  parseFloat((map[h]?.pnl||0).toFixed(2)),
+      total:map[h]?.total||0,
+    })).filter(d => d.total > 0);
+  }, [filteredTrades]);
+
+  // Hold time display
+  const fmtHold = mins => {
+    if (!mins || mins <= 0) return '—';
+    if (mins < 60) return `${Math.round(mins)}m`;
+    if (mins < 1440) return `${Math.floor(mins/60)}h ${Math.round(mins%60)}m`;
+    return `${Math.floor(mins/1440)}d ${Math.floor((mins%1440)/60)}h`;
+  };
+  const winHoldMins = useMemo(() => {
+    const wins = filteredTrades.filter(t => t.status==='Win' && t.entryDate && t.exitDate);
+    const mins = wins.map(t => {
+      const e = new Date(`${t.entryDate}T${t.entryTime||'00:00'}`);
+      const x = new Date(`${t.exitDate}T${t.exitTime||'00:00'}`);
+      return (x-e)/60000;
+    }).filter(v => v > 0);
+    return mins.length ? mins.reduce((s,v)=>s+v,0)/mins.length : 0;
+  }, [filteredTrades]);
+  const lossHoldMins = useMemo(() => {
+    const losses = filteredTrades.filter(t => t.status==='Loss' && t.entryDate && t.exitDate);
+    const mins = losses.map(t => {
+      const e = new Date(`${t.entryDate}T${t.entryTime||'00:00'}`);
+      const x = new Date(`${t.exitDate}T${t.exitTime||'00:00'}`);
+      return (x-e)/60000;
+    }).filter(v => v > 0);
+    return mins.length ? mins.reduce((s,v)=>s+v,0)/mins.length : 0;
+  }, [filteredTrades]);
+
+  return (
+    <div>
+      <div className="page-header">
+        <div>
+          <div className="page-title">Performance Analytics</div>
+          <div className="page-sub">Analyze your trading patterns and improve your strategy</div>
+        </div>
+        <div style={{display:'flex',gap:10,alignItems:'center',flexWrap:'wrap'}}>
+          <div className="time-filters">
+            {PERIODS.map(p=>(
+              <button key={p} className={`tf-btn${period===p?' active':''}`} onClick={()=>setPeriod(p)}
+                style={p==='Settings Range'&&period===p?{background:'rgba(59,130,246,.3)'}:{}}>
+                {p==='Settings Range'?'⚙ Date Range':p}
+              </button>
+            ))}
+          </div>
+          <div className="time-filters">
+            {FTYPES.map(f=>(
+              <button key={f} className={`tf-btn${ftype===f?' active':''}`} onClick={()=>setFtype(f)}
+                style={ftype===f&&f==='Winners'?{background:'var(--blue)'}:ftype===f&&f==='Losers'?{background:'var(--red)'}:{}}>
+                {f==='Winners'?'✓ ':f==='Losers'?'✗ ':''}{f}
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {/* Custom date picker */}
+      {period === 'Custom' && (
+        <div style={{padding:'8px 20px',borderBottom:'1px solid var(--border)',display:'flex',alignItems:'center',gap:10,background:'var(--bg-hover)',flexWrap:'wrap'}}>
+          <span style={{fontSize:12,color:'var(--text-secondary)',fontWeight:600}}>Custom range:</span>
+          <input type="date" className="form-control" style={{width:150,padding:'4px 8px',fontSize:12}} value={customFrom} onChange={e=>setCustomFrom(e.target.value)}/>
+          <span style={{fontSize:12,color:'var(--text-muted)'}}>→</span>
+          <input type="date" className="form-control" style={{width:150,padding:'4px 8px',fontSize:12}} value={customTo} onChange={e=>setCustomTo(e.target.value)}/>
+          {(customFrom||customTo) && <button className="btn btn-ghost btn-sm" onClick={()=>{setCustomFrom('');setCustomTo('');}}>✕ Clear</button>}
+        </div>
+      )}
+
+      {/* Settings range indicator */}
+      {period === 'Settings Range' && (stats.statsStartDate||stats.statsEndDate) && (
+        <div style={{padding:'8px 20px',borderBottom:'1px solid var(--border)',display:'flex',alignItems:'center',gap:8,background:'rgba(59,130,246,.06)'}}>
+          <span style={{fontSize:12,color:'var(--blue-bright)',fontWeight:600}}>
+            📅 {stats.statsStartDate||'all time'} → {stats.statsEndDate||'today'}
+          </span>
+          <span style={{fontSize:11,color:'var(--text-muted)'}}>· Change in Settings → Stats Date Range</span>
+        </div>
+      )}
+      {period === 'Settings Range' && !stats.statsStartDate && !stats.statsEndDate && (
+        <div style={{padding:'8px 20px',borderBottom:'1px solid var(--border)',background:'rgba(251,191,36,.06)'}}>
+          <span style={{fontSize:12,color:'var(--yellow)',fontWeight:600}}>⚠ No date range in Settings — showing all trades.</span>
+        </div>
+      )}
+
+      <div className="page-body">
+        {/* Top stats */}
+        <div className="analytics-top">
+          {[
+            {label:'TOTAL P&L',val:fmtK(fs.totalPnl),sub:`${fs.total} trades · ${fs.breakeven>0?fs.breakeven+' BE · ':''}excl. commission`,sub2:'Gross P&L for the selected period',color:fs.totalPnl>=0?'pos':'neg',icon:'💵',c:'blue'},
+            {label:'WIN RATE',val:`${fs.wr.toFixed(1)}%`,sub:`${fs.wins}W · ${fs.losses}L${fs.breakeven>0?` · ${fs.breakeven}BE (excl.)`:''}`,sub2:'Win/Loss trades only — breakeven excluded',color:fs.wr>=50?'pos':'neg',icon:'✅',c:'blue',bar:fs.wr},
+            {label:'COMMISSION',val:`-$${(fs.totalComm||0).toFixed(2)}`,sub:'Total fees paid',sub2:'Sum of all commissions and swap for this period',color:'neg',icon:'💸',c:'red'},
+            {label:'PROFIT FACTOR',val:isFinite(fs.pf)?fs.pf.toFixed(2):'∞',sub:fs.pf>=1.5?'Good':fs.pf>=1?'Break-even':'Below 1',sub2:'Gross profit ÷ Gross loss (above 1.5 is good)',color:'neu',icon:'📊',c:'purple'},
+            {label:'EXPECTANCY',val:`$${fs.exp.toFixed(2)}`,sub:'Average per trade',sub2:'Expected profit per trade based on your stats',color:fs.exp>=0?'pos':'neg',icon:'🎯',c:'yellow'},
+          ].map(s=>(
+            <div key={s.label} style={{background:'var(--bg-card)',border:'1px solid var(--border)',borderRadius:10,padding:'18px 20px'}}>
+              <div style={{fontSize:11,fontWeight:600,color:'var(--text-muted)',letterSpacing:'.5px',textTransform:'uppercase',marginBottom:10}}>{s.label}</div>
+              <div className={`stat-val ${s.color}`} style={{fontSize:28,marginBottom:4}}>{s.val}</div>
+              <div style={{fontSize:11,color:'var(--text-secondary)',marginBottom:2}}>{s.sub}</div>
+              {s.bar!==undefined && <div className="prog-bar" style={{marginTop:8}}><div className="prog-fill" style={{width:`${s.bar}%`,background:s.bar>=50?'var(--blue)':'var(--red)'}}/></div>}
+              <div style={{fontSize:10,color:'var(--text-muted)',marginTop:4}}>{s.sub2}</div>
+            </div>
+          ))}
+        </div>
+
+        {/* Quick stats + Equity curve */}
+        <div className="analytics-qe">
+          {/* Quick stats */}
+          <div className="card">
+            <div className="card-title">Quick Stats</div>
+            <div className="qs-grid">
+              <div className="qs-item"><div className="qs-label">AVG WINNER</div><div className="qs-val pos">${fs.avgW.toFixed(2)}</div></div>
+              <div className="qs-item"><div className="qs-label">AVG LOSER</div><div className="qs-val neg">-${fs.avgL.toFixed(2)}</div></div>
+              <div className="qs-item"><div className="qs-label">BEST TRADE</div><div className="qs-val pos">{fmtK(fs.best)}</div></div>
+              <div className="qs-item"><div className="qs-label">WORST TRADE</div><div className="qs-val neg">{fmtK(fs.worst)}</div></div>
+              <div className="qs-item"><div className="qs-label">WIN STREAK</div><div className="qs-val neu">{fs.maxWs} trades</div></div>
+              <div className="qs-item"><div className="qs-label">LOSS STREAK</div><div className="qs-val neu">{fs.maxLs} trades</div></div>
+              <div className="qs-item"><div className="qs-label">RISK:REWARD</div><div className="qs-val neu">{fs.avgRR > 0 ? `1:${fs.avgRR.toFixed(2)}` : '—'}</div></div>
+              <div className="qs-item"><div className="qs-label">OPEN TRADES</div><div className="qs-val neu">0</div></div>
+              <div className="qs-item"><div className="qs-label">AVG HOLD (WIN)</div><div className="qs-val pos" style={{fontSize:14}}>{fmtHold(winHoldMins)}</div></div>
+              <div className="qs-item"><div className="qs-label">AVG HOLD (LOSS)</div><div className={`qs-val ${lossHoldMins>winHoldMins&&winHoldMins>0?'neg':'neu'}`} style={{fontSize:14}}>{fmtHold(lossHoldMins)}</div></div>
+            </div>
+          </div>
+
+          {/* Equity curve */}
+          <div className="card">
+            <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:14}}>
+              <div>
+                <div className="card-title" style={{marginBottom:2}}>📈 Equity Curve</div>
+                <div style={{fontSize:11,color:'var(--text-muted)'}}>Cumulative P&L progression</div>
+              </div>
+              <div className="time-filters">
+                <button className={`tf-btn${ecMode==='equity'?' active':''}`} onClick={()=>setEcMode('equity')}>Equity</button>
+                <button className={`tf-btn${ecMode==='drawdown'?' active':''}`} onClick={()=>setEcMode('drawdown')}>Drawdown</button>
+              </div>
+            </div>
+            <ResponsiveContainer width="100%" height={200}>
+              <AreaChart data={ecMode==='equity'?equityCurve:drawdownCurve} margin={{top:5,right:0,left:0,bottom:0}}>
+                <defs>
+                  <linearGradient id="eg" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="5%"  stopColor={ecMode==='equity'?'#3b82f6':'#ef4444'} stopOpacity={0.25}/>
+                    <stop offset="95%" stopColor={ecMode==='equity'?'#3b82f6':'#ef4444'} stopOpacity={0}/>
+                  </linearGradient>
+                </defs>
+                <XAxis dataKey="date" tick={{fill:'var(--text-muted)',fontSize:10}} tickLine={false} axisLine={false} interval="preserveStartEnd" minTickGap={50}/>
+                <YAxis tick={{fill:'var(--text-muted)',fontSize:10}} tickLine={false} axisLine={false} tickFormatter={v=>`$${v}`}/>
+                <Tooltip content={<TIP/>}/>
+                <ReferenceLine y={0} stroke="var(--border-light)" strokeDasharray="3 3"/>
+                <Area type="monotone" dataKey={ecMode==='equity'?'pnl':'dd'} stroke={ecMode==='equity'?'#3b82f6':'#ef4444'} strokeWidth={2} fill="url(#eg)" dot={false}/>
+              </AreaChart>
+            </ResponsiveContainer>
+          </div>
+        </div>
+
+        {/* Long vs Short + Day Performance + Top Symbols */}
+        <div className="analytics-3col">
+          {/* Long vs Short */}
+          <div className="card">
+            <div className="card-title">📈 Long vs Short</div>
+            <div style={{fontSize:11,color:'var(--text-muted)',marginBottom:12}}>Performance by trade direction</div>
+            {[{side:'Long',data:lsData.long,color:'var(--blue-bright)',icon:'📈'},{side:'Short',data:lsData.short,color:'var(--red)',icon:'📉'}].map(({side,data,color,icon})=>(
+              <div key={side} style={{background:'var(--bg-hover)',borderRadius:8,padding:'13px 14px',marginBottom:10,border:`1px solid ${side==='Long'?'rgba(59,130,246,.2)':'rgba(239,68,68,.2)'}`}}>
+                <div style={{display:'flex',alignItems:'center',gap:7,marginBottom:10}}>
+                  <span style={{fontSize:14}}>{icon}</span>
+                  <span style={{fontWeight:700,color}}>{side}</span>
+                </div>
+                <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:8}}>
+                  <div><div style={{fontSize:9,color:'var(--text-muted)',fontWeight:600}}>TRADES</div><div style={{fontWeight:700}}>{data.total}</div></div>
+                  <div><div style={{fontSize:9,color:'var(--text-muted)',fontWeight:600}}>P&L</div><div style={{fontWeight:700,color:data.pnl>=0?'var(--blue-bright)':'var(--red)'}}>{fmtK(data.pnl)}</div></div>
+                  <div><div style={{fontSize:9,color:'var(--text-muted)',fontWeight:600}}>WIN %</div><div style={{fontWeight:700,color:parseFloat(data.wr)>=50?'var(--blue-bright)':'var(--red)'}}>{data.wr}%</div></div>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          {/* Day Performance */}
+          <div className="card">
+            <div className="card-title">📅 Day Performance</div>
+            <div style={{fontSize:11,color:'var(--text-muted)',marginBottom:12}}>Find your best trading days</div>
+            {dayPerf.map(d=>(
+              <div key={d.day} style={{display:'flex',alignItems:'center',gap:8,marginBottom:7}}>
+                <span style={{width:28,fontSize:11,color:'var(--text-secondary)',fontWeight:500}}>{d.day}</span>
+                <div style={{flex:1,height:8,background:'var(--bg-hover)',borderRadius:4,overflow:'hidden'}}>
+                  {d.pnl!==0 && <div style={{height:'100%',width:`${(Math.abs(d.pnl)/maxDayAbs)*100}%`,background:d.pnl>=0?'var(--blue)':'var(--red)',borderRadius:4}}/>}
+                </div>
+                <span style={{fontSize:11,fontWeight:700,color:d.pnl>=0?'var(--blue-bright)':'var(--red)',width:70,textAlign:'right'}}>{d.pnl===0?'—':fmt(d.pnl)}</span>
+              </div>
+            ))}
+          </div>
+
+          {/* Top Symbols */}
+          <div className="card">
+            <div className="card-title">🏆 Top Symbols</div>
+            <div style={{fontSize:11,color:'var(--text-muted)',marginBottom:12}}>Best performing assets</div>
+            {topSymbols.map((s,i)=>(
+              <div key={s.sym} style={{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'9px 0',borderBottom:'1px solid var(--border)'}}>
+                <div style={{display:'flex',alignItems:'center',gap:10}}>
+                  <span style={{width:20,height:20,borderRadius:'50%',background:'var(--bg-hover)',display:'inline-flex',alignItems:'center',justifyContent:'center',fontSize:10,fontWeight:700,color:'var(--text-muted)'}}>{i+1}</span>
+                  <div>
+                    <div style={{fontWeight:700,fontSize:13}}>{s.sym}</div>
+                    <div style={{fontSize:10,color:'var(--text-muted)'}}>{s.total} trades · {s.wr} win</div>
+                  </div>
+                </div>
+                <div className={s.pnl>=0?'pos':'neg'} style={{fontWeight:700,fontSize:13}}>{fmtK(s.pnl)}</div>
+              </div>
+            ))}
+            {topSymbols.length===0 && <div className="empty-state" style={{padding:'20px 0'}}><div className="empty-text">No data</div></div>}
+          </div>
+        </div>
+
+        {/* Session Performance */}
+        <div className="card" style={{marginBottom:16}}>
+          <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:4}}>
+            <span className="card-title" style={{margin:0}}>🌍 Session Performance</span>
+          </div>
+          <div style={{fontSize:11,color:'var(--text-muted)',marginBottom:16}}>Breakdown by trading session — Asian, London &amp; New York</div>
+          <div style={{display:'flex',height:8,borderRadius:4,overflow:'hidden',marginBottom:20}}>
+            <div style={{flex:2,background:'#854d0e',display:'flex',alignItems:'center',justifyContent:'center',fontSize:9,fontWeight:700,color:'rgba(255,255,255,.7)',letterSpacing:'.5px'}}>ASIAN</div>
+            <div style={{flex:2,background:'#1e3a5f',display:'flex',alignItems:'center',justifyContent:'center',fontSize:9,fontWeight:700,color:'rgba(255,255,255,.7)',letterSpacing:'.5px'}}>LONDON</div>
+            <div style={{flex:3,background:'#14532d',display:'flex',alignItems:'center',justifyContent:'center',fontSize:9,fontWeight:700,color:'rgba(255,255,255,.7)',letterSpacing:'.5px'}}>NEW YORK</div>
+          </div>
+          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:14}}>
+            {[
+              {key:'asian',  icon:'🏯', border:'rgba(133,77,14,.4)',  bg:'rgba(133,77,14,.08)'},
+              {key:'london', icon:'🏛', border:'rgba(30,58,95,.6)',   bg:'rgba(30,58,95,.15)'},
+              {key:'newyork',icon:'🗽', border:'rgba(20,83,45,.5)',   bg:'rgba(20,83,45,.12)'},
+            ].map(({key,icon,border,bg})=>{
+              const s=sessions[key];
+              return (
+                <div key={key} style={{background:bg,border:`1px solid ${border}`,borderRadius:10,padding:'16px'}}>
+                  <div style={{display:'flex',alignItems:'center',gap:7,marginBottom:4}}>
+                    <span style={{fontSize:18}}>{icon}</span>
+                    <div>
+                      <div style={{fontWeight:700,fontSize:14}}>{s.label}</div>
+                      <div style={{fontSize:10,color:'var(--text-muted)'}}>{s.time}</div>
+                    </div>
+                  </div>
+                  <div className={s.pnl>=0?'pos':'neg'} style={{fontSize:22,fontWeight:800,marginBottom:8}}>{fmtK(s.pnl)}</div>
+                  <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:8}}>
+                    <div><div style={{fontSize:9,color:'var(--text-muted)',fontWeight:600}}>TRADES</div><div style={{fontWeight:700,fontSize:12}}>{s.total}</div></div>
+                    <div><div style={{fontSize:9,color:'var(--text-muted)',fontWeight:600}}>WIN RATE</div><div style={{fontWeight:700,fontSize:12,color:parseFloat(s.wr)>=50?'var(--blue-bright)':'var(--red)'}}>{s.wr}%</div></div>
+                    <div><div style={{fontSize:9,color:'var(--text-muted)',fontWeight:600}}>AVG TRADE</div><div style={{fontWeight:700,fontSize:12,color:s.total>0&&s.pnl/s.total>=0?'var(--blue-bright)':'var(--red)'}}>{s.total>0?fmtK(s.pnl/s.total):'—'}</div></div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* ── Monthly P&L Bar Chart ──────────────────────────────────── */}
+        {monthlyChartData.length > 0 && (
+          <div className="card" style={{marginBottom:16}}>
+            <div className="card-title">📅 Monthly P&L</div>
+            <ResponsiveContainer width="100%" height={200}>
+              <BarChart data={monthlyChartData} margin={{top:5,right:10,left:0,bottom:5}} barCategoryGap="30%">
+                <XAxis dataKey="month" tick={{fill:'var(--text-muted)',fontSize:11}} tickLine={false} axisLine={false} type="category"/>
+                <YAxis tick={{fill:'var(--text-muted)',fontSize:10}} tickLine={false} axisLine={false} tickFormatter={v=>`$${v}`} width={60}/>
+                <Tooltip content={({active,payload,label})=>active&&payload?.length?(<div className="chart-tip"><div className="chart-tip-label">{label}</div><div className={`chart-tip-val ${payload[0].value>=0?'pos':'neg'}`}>{fmt(payload[0].value)}</div></div>):null}/>
+                <ReferenceLine y={0} stroke="var(--border-light)" strokeDasharray="3 3"/>
+                <Bar dataKey="pnl" radius={[4,4,0,0]} maxBarSize={80}>
+                  {monthlyChartData.map((d,i)=><Cell key={i} fill={d.pnl>=0?'#3b82f6':'#ef4444'} fillOpacity={0.85}/>)}
+                </Bar>
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+        )}
+
+        {/* ── Hour-by-Hour Performance ──────────────────────────────── */}
+        {hourlyData.length > 0 && (
+          <div className="card" style={{marginBottom:16}}>
+            <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:14}}>
+              <div>
+                <div className="card-title" style={{margin:0}}>🕐 Hour-by-Hour Performance</div>
+                <div style={{fontSize:11,color:'var(--text-muted)',marginTop:3}}>P&L grouped by entry hour (your local broker time)</div>
+              </div>
+            </div>
+            <ResponsiveContainer width="100%" height={200}>
+              <BarChart data={hourlyData} margin={{top:5,right:10,left:0,bottom:5}} barCategoryGap="20%">
+                <XAxis dataKey="hour" tick={{fill:'var(--text-muted)',fontSize:10}} tickLine={false} axisLine={false} type="category" interval={0}/>
+                <YAxis tick={{fill:'var(--text-muted)',fontSize:10}} tickLine={false} axisLine={false} tickFormatter={v=>`$${v}`} width={60}/>
+                <Tooltip content={({active,payload,label})=>active&&payload?.length?(<div className="chart-tip"><div className="chart-tip-label">{label} · {payload[0]?.payload?.total} trades</div><div className={`chart-tip-val ${payload[0].value>=0?'pos':'neg'}`}>{fmt(payload[0].value)}</div></div>):null}/>
+                <ReferenceLine y={0} stroke="var(--border-light)" strokeDasharray="3 3"/>
+                <Bar dataKey="pnl" radius={[4,4,0,0]} maxBarSize={40}>
+                  {hourlyData.map((d,i)=><Cell key={i} fill={d.pnl>=0?'#3b82f6':'#ef4444'} fillOpacity={0.85}/>)}
+                </Bar>
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+        )}
+
+        {/* ── Setup Breakdown ─────────────────────────────────────────── */}
+        <div className="card" style={{marginBottom:16}}>
+          <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:16}}>
+            <div>
+              <div className="card-title" style={{margin:0}}>📐 Setup Performance</div>
+              <div style={{fontSize:11,color:'var(--text-muted)',marginTop:3}}>Win/Loss/BE breakdown for every setup level</div>
+            </div>
+            <span style={{background:'var(--bg-hover)',border:'1px solid var(--border)',borderRadius:5,padding:'2px 9px',fontSize:11,color:'var(--text-secondary)',fontWeight:600}}>{period}</span>
+          </div>
+
+          {setupStats.length === 0 ? (
+            <div style={{textAlign:'center',padding:'24px 0',color:'var(--text-muted)',fontSize:13}}>No trades with setups in this period</div>
+          ) : (
+            <div style={{overflowX:'auto'}}>
+              <table style={{width:'100%',borderCollapse:'collapse',fontSize:13}}>
+                <thead>
+                  <tr style={{borderBottom:'2px solid var(--border)'}}>
+                    {['Setup','Trades','Wins','Losses','BE','Win Rate','Net P&L','Result'].map(h=>(
+                      <th key={h} style={{padding:'8px 12px',textAlign:h==='Setup'?'left':'center',fontSize:11,fontWeight:700,color:'var(--text-muted)',letterSpacing:'.5px',whiteSpace:'nowrap'}}>{h}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {setupStats.map(s=>{
+                    const isNoSetup = s.setup === 'No Setup';
+                    return (
+                      <tr key={s.setup} style={{borderBottom:'1px solid var(--border)',transition:'background .1s'}}
+                        onMouseEnter={e=>e.currentTarget.style.background='var(--bg-hover)'}
+                        onMouseLeave={e=>e.currentTarget.style.background=''}>
+                        <td style={{padding:'11px 12px'}}>
+                          <span style={{
+                            fontWeight: isNoSetup ? 500 : 700,
+                            fontSize: 13,
+                            color: isNoSetup ? 'var(--text-muted)' : 'var(--text-primary)',
+                            background: isNoSetup ? 'transparent' : 'rgba(59,130,246,.1)',
+                            border: isNoSetup ? 'none' : '1px solid rgba(59,130,246,.2)',
+                            borderRadius: 5, padding: isNoSetup ? 0 : '2px 8px',
+                          }}>{s.setup}</span>
+                        </td>
+                        <td style={{padding:'11px 12px',textAlign:'center',fontWeight:700}}>{s.total}</td>
+                        <td style={{padding:'11px 12px',textAlign:'center'}}>
+                          <span style={{fontWeight:700,color:'#4ade80',background:'rgba(74,222,128,.1)',borderRadius:5,padding:'2px 10px'}}>{s.wins}</span>
+                        </td>
+                        <td style={{padding:'11px 12px',textAlign:'center'}}>
+                          <span style={{fontWeight:700,color:'var(--red)',background:'var(--red-dim)',borderRadius:5,padding:'2px 10px'}}>{s.losses}</span>
+                        </td>
+                        <td style={{padding:'11px 12px',textAlign:'center'}}>
+                          <span style={{fontWeight:700,color:'var(--text-muted)',background:'var(--bg-hover)',borderRadius:5,padding:'2px 10px'}}>{s.be}</span>
+                        </td>
+                        <td style={{padding:'11px 12px',textAlign:'center'}}>
+                          <div style={{display:'flex',flexDirection:'column',alignItems:'center',gap:3}}>
+                            <span style={{fontWeight:800,color:parseFloat(s.wr)>=50?'#4ade80':'var(--red)'}}>{s.wr}%</span>
+                            <div style={{width:60,height:5,background:'var(--bg-hover)',borderRadius:3,overflow:'hidden'}}>
+                              <div style={{width:`${s.wr}%`,height:'100%',background:parseFloat(s.wr)>=50?'#4ade80':'var(--red)',borderRadius:3}}/>
+                            </div>
+                          </div>
+                        </td>
+                        <td style={{padding:'11px 12px',textAlign:'center',fontWeight:800,color:s.pnl>=0?'#60a5fa':'#f87171',whiteSpace:'nowrap'}}>
+                          {s.pnl>=0?'+':''}{fmtK(s.pnl)}
+                        </td>
+                        <td style={{padding:'11px 12px',textAlign:'center'}}>
+                          <span style={{
+                            fontSize:10,fontWeight:700,borderRadius:5,padding:'3px 10px',
+                            background: s.pnl>0&&parseFloat(s.wr)>=50 ? 'rgba(74,222,128,.15)' : s.pnl<0||parseFloat(s.wr)<40 ? 'var(--red-dim)' : 'var(--bg-hover)',
+                            color: s.pnl>0&&parseFloat(s.wr)>=50 ? '#4ade80' : s.pnl<0||parseFloat(s.wr)<40 ? 'var(--red)' : 'var(--text-muted)',
+                          }}>
+                            {s.pnl>0&&parseFloat(s.wr)>=50 ? '✓ Edge' : s.pnl<0||parseFloat(s.wr)<40 ? '✗ Review' : '~ Neutral'}
+                          </span>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+
+        {/* Your Stats big table + Win/Loss dist + Recent */}
+        <div className="analytics-stats">
+          {/* Full stats table */}
+          <div className="card">
+            <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:16}}>
+              <div className="card-title" style={{margin:0}}>Your Stats</div>
+              <span style={{background:'var(--bg-hover)',border:'1px solid var(--border)',borderRadius:5,padding:'2px 9px',fontSize:11,color:'var(--text-secondary)',fontWeight:600}}>{period}</span>
+            </div>
+            {/* Best/Worst/Avg month */}
+            <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:10,marginBottom:16}}>
+              {[
+                {l:'BEST MONTH',v:fmtK(monthStats.best),sub:monthStats.bestMonth||'—',c:'pos'},
+                {l:'WORST MONTH',v:fmtK(monthStats.worst),sub:monthStats.worstMonth||'—',c:'neg'},
+                {l:'AVERAGE',v:fmtK(monthStats.avg),sub:'per Month',c:monthStats.avg>=0?'pos':'neg'},
+              ].map(x=>(
+                <div key={x.l} style={{background:'var(--bg-hover)',borderRadius:8,padding:'12px 14px'}}>
+                  <div style={{fontSize:9,fontWeight:600,color:'var(--text-muted)',marginBottom:4}}>{x.l}</div>
+                  <div className={`${x.c}`} style={{fontWeight:800,fontSize:15}}>{x.v}</div>
+                  <div style={{fontSize:10,color:'var(--text-muted)'}}>{x.sub}</div>
+                </div>
+              ))}
+            </div>
+            {/* Stats rows */}
+            <div style={{columns:2,columnGap:20}}>
+              {[
+                ['Total P&L (Gross)',   fmtK(fs.totalPnl),         fs.totalPnl>=0],
+                ['Commission',         `-$${(fs.totalComm||0).toFixed(2)}`,  false],
+                ['Open trades','0',null],
+                ['Average daily volume', fs.total>0?(fs.total/Math.max(tradingDays.total,1)).toFixed(1):'0',null],
+                ['Total trading days',tradingDays.total,null],
+                ['Average winning trade',`$${fs.avgW.toFixed(2)}`,true],
+                ['Winning days',tradingDays.winDays,null],
+                ['Average losing trade',`-$${fs.avgL.toFixed(2)}`,false],
+                ['Losing days',tradingDays.lossDays,null],
+                ['Total number of trades',fs.total,null],
+                ['Breakeven days',tradingDays.total-tradingDays.winDays-tradingDays.lossDays,null],
+                ['Number of winning trades',fs.wins,null],
+                ['Max consecutive winning days',fs.maxWs,null],
+                ['Number of losing trades',fs.losses,null],
+                ['Max consecutive losing days',fs.maxLs,null],
+                ['Max consecutive wins',fs.maxWs,null],
+                ['Average daily P&L',`$${tradingDays.avgDayPnl.toFixed(2)}`,tradingDays.avgDayPnl>=0],
+                ['Max consecutive losses',fs.maxLs,null],
+                ['Average winning day P&L',`$${tradingDays.avgWinDay.toFixed(2)}`,true],
+                ['Largest profit',fmtK(fs.best),true],
+                ['Average losing day P&L',`$${tradingDays.avgLossDay.toFixed(2)}`,false],
+                ['Largest loss',fmtK(fs.worst),false],
+                ['Largest profitable day',fmtK(tradingDays.bestDay),true],
+                ['Trade expectancy',`$${fs.exp.toFixed(2)}`,fs.exp>=0],
+                ['Largest losing day',fmtK(tradingDays.worstDay),false],
+                ['Max drawdown',fmtK(-stats.maxDrawdown),false],
+                ['Total commissions',`-$${stats.totalCommissions.toFixed(2)}`,false],
+                ['Max drawdown %',`${stats.accountSize>0?((stats.maxDrawdown/stats.accountSize)*100).toFixed(2):0}%`,false],
+                ['Account Size', `$${(stats.accountSize||10000).toLocaleString()}`, null],
+                ['Account Return', `${stats.accountSize>0?((stats.totalPnl/stats.accountSize)*100).toFixed(2):0}%`, stats.totalPnl>=0],
+              ].map(([l,v,pos])=>(
+                <div key={l} style={{display:'flex',justifyContent:'space-between',padding:'6px 0',borderBottom:'1px solid var(--border)',breakInside:'avoid',fontSize:12}}>
+                  <span style={{color:'var(--text-secondary)'}}>{l}</span>
+                  <span style={{fontWeight:700,color:pos===null?'var(--text-primary)':pos?'var(--blue-bright)':'var(--red)'}}>{v}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* Right: Win/Loss + Recent */}
+          <div style={{display:'flex',flexDirection:'column',gap:14}}>
+            <div className="card">
+              <div className="card-title">Win/Loss Distribution</div>
+              <div className="wl-bar" style={{marginBottom:12}}>
+                <div className="wl-win" style={{flex:fs.wins}}>
+                  {fs.wins>0&&<span>{fs.wins}W</span>}
+                </div>
+                <div className="wl-loss" style={{flex:Math.max(fs.losses,1)}}>
+                  {fs.losses>0&&<span>{fs.losses}L</span>}
+                </div>
+              </div>
+              <div style={{display:'flex',flexDirection:'column',gap:6,fontSize:12}}>
+                <div style={{display:'flex',justifyContent:'space-between'}}><span style={{display:'flex',alignItems:'center',gap:5}}><span style={{width:8,height:8,borderRadius:2,background:'var(--blue)',display:'inline-block'}}/> Gross Profit</span><span className="pos" style={{fontWeight:700}}>${fs.gp.toFixed(2)}</span></div>
+                <div style={{display:'flex',justifyContent:'space-between'}}><span style={{display:'flex',alignItems:'center',gap:5}}><span style={{width:8,height:8,borderRadius:2,background:'var(--red)',display:'inline-block'}}/> Gross Loss</span><span className="neg" style={{fontWeight:700}}>-${fs.gl.toFixed(2)}</span></div>
+                <div style={{display:'flex',justifyContent:'space-between'}}><span style={{display:'flex',alignItems:'center',gap:5}}><span style={{width:8,height:8,borderRadius:2,background:'var(--blue)',display:'inline-block'}}/> Net Result</span><span className={fs.totalPnl>=0?'pos':'neg'} style={{fontWeight:700}}>${fs.totalPnl.toFixed(2)}</span></div>
+              </div>
+            </div>
+
+            <div className="card">
+              <div className="card-title">🕐 Recent Trades</div>
+              <div style={{fontSize:10,color:'var(--text-muted)',marginBottom:10}}>Your last {Math.min(filteredTrades.length,5)} trades</div>
+              {filteredTrades.slice(0,5).map(t=>(
+                <div key={t.id} style={{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'8px 0',borderBottom:'1px solid var(--border)'}}>
+                  <div style={{display:'flex',alignItems:'center',gap:9}}>
+                    <div style={{width:28,height:28,background:t.side==='Long'?'var(--blue-dim)':'var(--red-dim)',borderRadius:6,display:'flex',alignItems:'center',justifyContent:'center',fontSize:12}}>
+                      {t.side==='Long'?'📈':'📉'}
+                    </div>
+                    <div>
+                      <div style={{fontWeight:700,fontSize:13}}>{t.symbol}</div>
+                      <div style={{fontSize:10,color:'var(--text-muted)'}}>{t.entryDate?.slice(5)}</div>
+                    </div>
+                  </div>
+                  <div className={`${(t.pnl||0)>=0?'pos':'neg'}`} style={{fontWeight:700,fontSize:13}}>{fmtK(t.pnl||0)}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
