@@ -776,78 +776,6 @@ export function ImportPage() {
       return datesToCheck.includes(xd) || `nd-${xep}-${xsz}` === ndKey;
     });
   };
-  const exportPDF = () => {
-    // Filter by active account same way other pages do
-    const accountTrades = activeAccountId
-      ? trades.filter(x => x.accountId === activeAccountId || x.source === accounts.find(a=>a.id===activeAccountId)?.name || x.source === accounts.find(a=>a.id===activeAccountId)?.source)
-      : trades;
-    const t = accountTrades.filter(x => !x.isWithdrawal && !x.isDeposit);
-    const accountLabel = activeAccountId ? (accounts.find(a=>a.id===activeAccountId)?.name || 'Selected Account') : 'All Accounts';
-    const wins = t.filter(x => x.status==='Win').length;
-    const losses = t.filter(x => x.status==='Loss').length;
-    const totalPnl = t.reduce((s,x)=>s+(x.pnl||0),0);
-    const grossP = t.filter(x=>x.status==='Win').reduce((s,x)=>s+(x.pnl||0),0);
-    const grossL = Math.abs(t.filter(x=>x.status==='Loss').reduce((s,x)=>s+(x.pnl||0),0));
-    const wr = (wins+losses)>0?((wins/(wins+losses))*100).toFixed(1):'0.0';
-    const pf = grossL>0?(grossP/grossL).toFixed(2):grossP>0?'∞':'0.00';
-    const comm = t.reduce((s,x)=>s+(x.fees||0),0);
-    const symMap = {};
-    t.forEach(x=>{if(!symMap[x.symbol])symMap[x.symbol]={pnl:0,n:0};symMap[x.symbol].pnl+=x.pnl||0;symMap[x.symbol].n++;});
-    const topSyms = Object.entries(symMap).sort(([,a],[,b])=>Math.abs(b.pnl)-Math.abs(a.pnl)).slice(0,5);
-    const monthMap = {};
-    t.forEach(x=>{const m=(x.exitDate||x.entryDate||'').slice(0,7);if(m){if(!monthMap[m])monthMap[m]=0;monthMap[m]+=x.pnl||0;}});
-    const months = Object.entries(monthMap).sort(([a],[b])=>a.localeCompare(b));
-    const fmt = n => `${n>=0?'+':'-'}$${Math.abs(n).toFixed(2)}`;
-    const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>TradeFolio Report</title>
-    <style>
-      body{font-family:Arial,sans-serif;color:#1a1a2e;padding:30px;max-width:900px;margin:0 auto;font-size:13px;}
-      h1{font-size:24px;font-weight:800;margin-bottom:4px;}
-      .sub{color:#666;margin-bottom:24px;font-size:12px;}
-      .grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:24px;}
-      .card{background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:14px;}
-      .clabel{font-size:10px;font-weight:700;color:#64748b;letter-spacing:.5px;text-transform:uppercase;margin-bottom:4px;}
-      .cval{font-size:22px;font-weight:800;}
-      .pos{color:#2563eb;} .neg{color:#dc2626;}
-      table{width:100%;border-collapse:collapse;margin-bottom:20px;}
-      th{text-align:left;font-size:11px;font-weight:700;color:#64748b;border-bottom:2px solid #e2e8f0;padding:8px 10px;text-transform:uppercase;}
-      td{padding:8px 10px;border-bottom:1px solid #f1f5f9;font-size:12px;}
-      h2{font-size:14px;font-weight:700;margin:20px 0 10px;padding-bottom:6px;border-bottom:2px solid #e2e8f0;}
-      .bar-wrap{display:flex;height:20px;border-radius:4px;overflow:hidden;margin-bottom:16px;}
-      .bar-win{background:#2563eb;display:flex;align-items:center;justify-content:center;color:#fff;font-size:11px;font-weight:700;}
-      .bar-loss{background:#dc2626;display:flex;align-items:center;justify-content:center;color:#fff;font-size:11px;font-weight:700;}
-      @media print{body{padding:0;}}
-    </style></head><body>
-    <h1>TradeFolio Performance Report</h1>
-    <div class="sub">Generated ${new Date().toLocaleDateString('en-US',{dateStyle:'long'})} · ${t.length} trades · ${accountLabel}</div>
-    <div class="grid">
-      <div class="card"><div class="clabel">Total P&L</div><div class="cval ${totalPnl>=0?'pos':'neg'}">${fmt(totalPnl)}</div></div>
-      <div class="card"><div class="clabel">Win Rate</div><div class="cval">${wr}%</div></div>
-      <div class="card"><div class="clabel">Profit Factor</div><div class="cval">${pf}</div></div>
-      <div class="card"><div class="clabel">Commission</div><div class="cval neg">-$${comm.toFixed(2)}</div></div>
-      <div class="card"><div class="clabel">Total Trades</div><div class="cval">${t.length}</div></div>
-      <div class="card"><div class="clabel">Winners</div><div class="cval pos">${wins}</div></div>
-      <div class="card"><div class="clabel">Losers</div><div class="cval neg">${losses}</div></div>
-      <div class="card"><div class="clabel">Gross Profit</div><div class="cval pos">+$${grossP.toFixed(2)}</div></div>
-    </div>
-    <div class="bar-wrap">
-      <div class="bar-win" style="flex:${wins}">${wins}W</div>
-      <div class="bar-loss" style="flex:${Math.max(losses,1)}">${losses}L</div>
-    </div>
-    <h2>Top Symbols</h2>
-    <table><thead><tr><th>Symbol</th><th>Trades</th><th>P&L</th></tr></thead><tbody>
-      ${topSyms.map(([sym,d])=>`<tr><td>${sym}</td><td>${d.n}</td><td class="${d.pnl>=0?'pos':'neg'}">${fmt(d.pnl)}</td></tr>`).join('')}
-    </tbody></table>
-    <h2>Monthly P&L</h2>
-    <table><thead><tr><th>Month</th><th>P&L</th></tr></thead><tbody>
-      ${months.map(([m,pnl])=>`<tr><td>${m}</td><td class="${pnl>=0?'pos':'neg'}">${fmt(pnl)}</td></tr>`).join('')}
-    </tbody></table>
-    </body></html>`;
-    const w = window.open('','_blank');
-    w.document.write(html);
-    w.document.close();
-    setTimeout(()=>w.print(), 500);
-  };
-
   const exportAll = () => {
     if (!trades.length) return;
     const headers = ['symbol','side','status','entryDate','entryTime','exitDate','exitTime','entryPrice','exitPrice','size','fees','pnl','rMultiple','setup','timeframe','notes','emotion'];
@@ -875,10 +803,7 @@ export function ImportPage() {
     <div>
       <div className="page-header">
         <div><div className="page-title">Import / Export</div><div className="page-sub">Import trades from MT5 Excel report or CSV</div></div>
-        <div style={{display:'flex',gap:8}}>
-          <button className="btn btn-secondary" onClick={exportAll}>⬇ Export CSV</button>
-          <button className="btn btn-secondary" onClick={exportPDF}>📄 Export PDF Report</button>
-        </div>
+        <button className="btn btn-secondary" onClick={exportAll}>⬇ Export All Trades</button>
       </div>
 
       <div className="page-body" style={{ maxWidth: 760 }}>
@@ -1275,6 +1200,8 @@ export function SettingsPage() {
   const [dedupResult, setDedupResult] = useState(null);
   const COLORS = ['#3b82f6','#10b981','#f59e0b','#ef4444','#8b5cf6','#ec4899','#14b8a6','#f97316'];
   const [saved, setSaved] = useState(false);
+  const [newSymbol, setNewSymbol] = useState('');
+  const [newSymRate, setNewSymRate] = useState('');
 
   // Supabase state
   const cfg = getSupabaseConfig();
@@ -1481,6 +1408,61 @@ export function SettingsPage() {
                   <input className="form-control" type="number" step="0.01" min="0" placeholder="e.g. 7.00" value={form.brokeragePerLot||''} onChange={e=>s('brokeragePerLot',parseFloat(e.target.value)||0)}/>
                 </div>
               </div>
+
+              {/* Symbol-specific commission overrides */}
+              <div style={{marginBottom:16}}>
+                <label className="form-label" style={{marginBottom:6}}>
+                  Symbol Commission Overrides
+                  <span style={{fontWeight:400,color:'var(--text-muted)',fontSize:11,marginLeft:6}}>
+                    ($/lot — overrides global rate for that symbol when no stored fee exists)
+                  </span>
+                </label>
+                <div style={{display:'flex',flexDirection:'column',gap:6}}>
+                  {Object.entries(form.symbolCommissions||{}).map(([sym,rate])=>(
+                    <div key={sym} style={{display:'flex',alignItems:'center',gap:8}}>
+                      <div className="form-control" style={{width:120,background:'var(--bg-card2)',color:'var(--text-primary)',fontWeight:600}}>{sym}</div>
+                      <span style={{color:'var(--text-muted)',fontSize:13}}>→</span>
+                      <input className="form-control" type="number" step="0.01" min="0" style={{width:100}}
+                        value={rate}
+                        onChange={e=>{
+                          const updated={...(form.symbolCommissions||{}),[sym]:parseFloat(e.target.value)||0};
+                          s('symbolCommissions',updated);
+                        }}/>
+                      <span style={{color:'var(--text-muted)',fontSize:12}}>$/lot</span>
+                      <button className="btn btn-ghost btn-sm" style={{color:'var(--red)',padding:'2px 8px'}}
+                        onClick={()=>{
+                          const updated={...(form.symbolCommissions||{})};
+                          delete updated[sym];
+                          s('symbolCommissions',updated);
+                        }}>✕ Remove</button>
+                    </div>
+                  ))}
+                  <div style={{display:'flex',alignItems:'center',gap:8,marginTop:4}}>
+                    <input className="form-control" style={{width:120}} placeholder="e.g. BTCUSD"
+                      value={newSymbol}
+                      onChange={e=>setNewSymbol(e.target.value.toUpperCase())}
+                      onKeyDown={e=>{ if(e.key==='Enter' && newSymbol && newSymRate){ s('symbolCommissions',{...(form.symbolCommissions||{}),[newSymbol]:parseFloat(newSymRate)||0}); setNewSymbol(''); setNewSymRate(''); }}}/>
+                    <span style={{color:'var(--text-muted)',fontSize:13}}>→</span>
+                    <input className="form-control" type="number" step="0.01" min="0" style={{width:100}}
+                      placeholder="e.g. 12"
+                      value={newSymRate}
+                      onChange={e=>setNewSymRate(e.target.value)}
+                      onKeyDown={e=>{ if(e.key==='Enter' && newSymbol && newSymRate){ s('symbolCommissions',{...(form.symbolCommissions||{}),[newSymbol]:parseFloat(newSymRate)||0}); setNewSymbol(''); setNewSymRate(''); }}}/>
+                    <span style={{color:'var(--text-muted)',fontSize:12}}>$/lot</span>
+                    <button className="btn btn-secondary btn-sm"
+                      disabled={!newSymbol||!newSymRate}
+                      onClick={()=>{
+                        if(!newSymbol||!newSymRate) return;
+                        s('symbolCommissions',{...(form.symbolCommissions||{}),[newSymbol.toUpperCase()]:parseFloat(newSymRate)||0});
+                        setNewSymbol(''); setNewSymRate('');
+                      }}>+ Add</button>
+                  </div>
+                  <div style={{fontSize:11,color:'var(--text-muted)',marginTop:2}}>
+                    💡 Trades imported from Excel or with manually edited commission always use their stored fee regardless of this setting.
+                  </div>
+                </div>
+              </div>
+
               <div className="form-row cols-2" style={{ marginBottom:0 }}>
                 <div className="form-group" style={{ marginBottom:0 }}>
                   <label className="form-label">Stats Start Date</label>
